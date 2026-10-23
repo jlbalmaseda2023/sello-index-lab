@@ -1,0 +1,96 @@
+name: index-lane
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'repo publico owner/name a indexar'
+        required: true
+        default: 'grafana/grafana'
+        type: string
+      ref:
+        description: 'rama/tag a clonar (el sha real se captura y queda en el manifiesto)'
+        required: true
+        default: 'main'
+        type: string
+      workdir:
+        description: 'subdir del target donde corre el indexador (. = raiz)'
+        required: true
+        default: '.'
+        type: string
+      indexer:
+        description: 'indexador'
+        required: true
+        default: 'scip-go'
+        type: choice
+        options: [scip-go, scip-typescript]
+
+jobs:
+  index:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: go toolchain (pierna go)
+        if: inputs.indexer == 'scip-go'
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.2'
+          check-latest: true
+
+      - name: node toolchain (pierna ts)
+        if: inputs.indexer == 'scip-typescript'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: clone target (shallow sobre ref; sha real capturado)
+        run: |
+          git clone --depth 1 --branch "${{ inputs.ref }}" "https://github.com/${{ inputs.target }}" target
+          cd target && git rev-parse HEAD | tee ../target-sha.txt
+
+      - name: install indexer
+        run: |
+          if [ "${{ inputs.indexer }}" = "scip-go" ]; then
+            go install github.com/sourcegraph/scip-go/cmd/scip-go@latest
+            "$(go env GOPATH)/bin/scip-go" --version || true
+          else
+            npm install -g @sourcegraph/scip-typescript@0.5.2
+            scip-typescript --version
+          fi
+
+      - name: index target
+        working-directory: target
+        run: |
+          set -o pipefail
+          if [ "${{ inputs.indexer }}" = "scip-go" ]; then
+            BIN="$(go env GOPATH)/bin/scip-go"
+            "$BIN" --output ../index.scip 2>&1 | tail -30 || "$BIN" 2>&1 | tail -30
+          else
+            scip-typescript index "${{ inputs.workdir }}" --output ../index.scip --no-progress-bar 2>&1 | tail -30
+          fi
+          ls -la ../index.scip 2>/dev/null || ls -la index.scip 2>/dev/null || true
+          [ -f index.scip ] && mv index.scip ../index.scip || true
+
+      - name: digest + manifest + stats
+        run: |
+          curl -sL https://github.com/scip-code/scip/releases/download/v0.10.0/scip-linux-amd64.tar.gz -o scip.tgz
+          tar xzf scip.tgz && chmod +x scip
+          ./scip stats --from index.scip 2>&1 | tail -25 || true
+          sha256sum index.scip | tee index.sha256
+          printf '{"target":"%s","ref":"%s","indexedSha":"%s","indexer":"%s","workdir":"%s","runUrl":"%s"}\n' \
+            "${{ inputs.target }}" "${{ inputs.ref }}" "$(cat target-sha.txt)" \
+            "${{ inputs.indexer }}" "${{ inputs.workdir }}" \
+            "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" > manifest.json
+          cat manifest.json
+
+      - name: upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: index-${{ inputs.indexer }}-${{ inputs.ref }}
+          path: |
+            index.scip
+            index.sha256
+            manifest.json
+            target-sha.txt
+          if-no-files-found: error
+          retention-days: 14
