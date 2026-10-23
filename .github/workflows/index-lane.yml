@@ -51,7 +51,7 @@ jobs:
       - name: install indexer
         run: |
           if [ "${{ inputs.indexer }}" = "scip-go" ]; then
-            go install github.com/sourcegraph/scip-go/cmd/scip-go@latest
+            go install github.com/scip-code/scip-go/cmd/scip-go@latest
             "$(go env GOPATH)/bin/scip-go" --version || true
           else
             npm install -g @sourcegraph/scip-typescript@0.5.2
